@@ -179,7 +179,7 @@ func ifaceAddIPv4Addr(iface *net.Interface, ip net.IP, mask net.IPMask) error {
 		brd[i] |= ^mask[i]
 	}
 	prefixLen, _ := mask.Size()
-	return ipRunIface(iface, "addr add %s/%d brd %s dev %s", ip, prefixLen, brd, iface.Name)
+	return ipRunIface(iface, "addr add %s/%d brd %s dev %s noprefixroute", ip, prefixLen, brd, iface.Name)
 }
 
 // ifaceAddIPv6Addr adds the given IPv6 address to the network interface.
