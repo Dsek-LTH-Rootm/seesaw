@@ -29,7 +29,7 @@ import (
 	"time"
 )
 
-const BGPSocketPath = "/var/run/quagga/bgpd.vty"
+const BGPSocketPath = "/var/run/frr/bgpd.vty"
 
 var bgpConfigLock sync.Mutex
 
