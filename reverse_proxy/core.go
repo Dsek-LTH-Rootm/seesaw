@@ -2,41 +2,48 @@ package reverse_proxy
 
 import (
 	"crypto/tls"
-	"github.com/google/seesaw/engine/config"
-	"net"
+	"github.com/google/seesaw/common/conn"
+	"github.com/google/seesaw/common/seesaw"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
+	"strconv"
+	"syscall"
 	"time"
 
 	log "github.com/golang/glog"
 )
 
 var defaultConfig = Config{
-	ListenPort:  string(443),
+	ListenPort:  string(rune(443)),
 	CertFile:    "/etc/seesaw/ssl/cert.pem",
 	CertKeyFile: "/etc/seesaw/ssl/key.pem",
+	seesaw:      nil,
 }
 
 type Config struct {
 	ListenPort  string
 	CertFile    string
 	CertKeyFile string
-	Cluster     config.Cluster
+	seesaw      *conn.Seesaw
 }
 
 type RPS struct {
 	cfg            *Config
 	shutdown       chan bool
 	shutdownListen chan bool
+	hostProxies    map[string]*httputil.ReverseProxy
 }
 
-func DefaultConfig() Config {
+func DefaultConfig(conn *conn.Seesaw) Config {
+	defaultConfig.seesaw = conn
 	return defaultConfig
 }
 
 // New returns an initialised RPS struct.
 func New(cfg *Config) *RPS {
 	if cfg == nil {
-		defaultCfg := DefaultConfig()
+		defaultCfg := DefaultConfig(nil)
 		cfg = &defaultCfg
 	}
 
@@ -44,6 +51,7 @@ func New(cfg *Config) *RPS {
 		cfg:            cfg,
 		shutdown:       make(chan bool),
 		shutdownListen: make(chan bool),
+		hostProxies:    map[string]*httputil.ReverseProxy{},
 	}
 }
 
@@ -73,6 +81,7 @@ func (e *RPS) listen() {
 
 	monitorHTTP := &http.Server{
 		ReadTimeout:    30 * time.Second,
+		Handler:        &customHandler{},
 		WriteTimeout:   30 * time.Second,
 		MaxHeaderBytes: 1 << 20,
 	}
@@ -80,46 +89,78 @@ func (e *RPS) listen() {
 
 	log.Infof("listening on port %v for reverse proxy", e.cfg.ListenPort)
 
-	for {
-		conn, err := ln.Accept()
-		shouldBreak := false
-		select {
-		case <-e.shutdownListen:
-			{
-				e.shutdownListen <- true
-				shouldBreak = true
-				break
-			}
-		default:
-		}
-
-		if shouldBreak {
-			break
-		}
-
-		if err != nil {
-			log.Warningf("error in accepting new connection to RPS: %s", err)
-		}
-
-		go handle(conn)
-	}
-
 	<-e.shutdownListen
 	err = ln.Close()
 	e.shutdownListen <- true
 }
 
-func handle(clientConn net.Conn) {
-	tlsconn, ok := clientConn.(*tls.Conn)
+type customHandler struct {
+	response string
+	rps      RPS
+}
+
+func (c *customHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	//Uncomment this and add to condition per comment below if we get mixed-transport issues
+	/*
+		//Get IP protocol, default IPV6
+		ip_proto := seesaw.AF(syscall.AF_INET6)
+		if net.ParseIP(request.RemoteAddr).To4() != nil {
+			ip_proto = seesaw.AF(syscall.AF_INET)
+		}
+
+	*/
+
+	//Check if we already have a proxy connection to this location
+	proxy, ok := c.rps.hostProxies[request.Host]
+
 	if ok {
-		err := tlsconn.Handshake()
-		if err != nil {
-			log.Warningf("error in tls handshake for %s: %s", clientConn.RemoteAddr(), err)
-			clientConn.Close()
-			return
+		proxy.ServeHTTP(writer, request)
+		return
+	}
+
+	//Get vservers
+	vservers, err := c.rps.cfg.seesaw.Vservers()
+	if err != nil {
+		log.Warningf("error getting vservers: %v", err)
+		return
+	}
+
+	//Find the target host in our Vservers, since we do not have a proxy there already
+
+	if vserver, ok := vservers[request.Host]; ok {
+		//Loop through all services for this host (IPv4/IPv6 transport services)
+		for service := range vserver.Services {
+			if service.Proto == syscall.IPPROTO_TCP {
+				//Maybe add && service.AF == ip_proto to condition below if we get weird mixed-transport issues
+				if vserver.Services[service].Healthy {
+					//Get target ip, default to ipv6, change if the service address family is ipv4
+					targetIp := vserver.IPv6Addr.String()
+					if service.AF == seesaw.AF(syscall.AF_INET) {
+						targetIp = vserver.IPv4Addr.String()
+					}
+
+					//Parse the target url. Does not need part after the port, the proxy fixes that
+					target, err := url.Parse("http://" + targetIp + strconv.Itoa(int(service.Port)))
+
+					if err != nil {
+						log.Warningf("error parsing target IP: %v", err)
+						return
+					}
+
+					newProxy := httputil.NewSingleHostReverseProxy(target)
+					c.rps.hostProxies[request.Host] = newProxy
+					newProxy.ServeHTTP(writer, request)
+					return
+				} else {
+					writer.Write([]byte("503: Host not currently up"))
+				}
+			}
 		}
 
 	}
+
+	writer.Write([]byte("403: Host forbidden"))
+	return
 }
 
 // Shutdown signals the RPS server to shutdown.

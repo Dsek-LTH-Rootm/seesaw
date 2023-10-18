@@ -75,19 +75,21 @@ const (
 	SCHA
 	SCHealthcheck
 	SCLocalCLI
+	SCReverseProxy
 	SCNCC
 	SCRemoteCLI
 )
 
 var componentNames = map[Component]string{
-	SCNone:        "none",
-	SCEngine:      "engine",
-	SCECU:         "ecu",
-	SCHA:          "ha",
-	SCHealthcheck: "healthcheck",
-	SCLocalCLI:    "local-cli",
-	SCNCC:         "ncc",
-	SCRemoteCLI:   "remote-cli",
+	SCNone:         "none",
+	SCEngine:       "engine",
+	SCECU:          "ecu",
+	SCHA:           "ha",
+	SCHealthcheck:  "healthcheck",
+	SCLocalCLI:     "local-cli",
+	SCReverseProxy: "reverse-proxy",
+	SCNCC:          "ncc",
+	SCRemoteCLI:    "remote-cli",
 }
 
 // String returns the string representation of a Component.
