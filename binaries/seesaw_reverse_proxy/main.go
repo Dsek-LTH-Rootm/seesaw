@@ -12,8 +12,9 @@ import (
 
 var (
 	seesawReverseProxy *reverse_proxy.RPS
+	engineSocket       = flag.String("engine", seesaw.EngineSocket, "Seesaw Engine Socket")
 	seesawConn         *conn.Seesaw
-	listenPort         = flag.String("listen_port", string(443), "Reverse proxy listen port")
+	listenPort         = flag.String("listen_port", ":443", "Reverse proxy listen port")
 	certFile           = flag.String("cert_file", "/etc/seesaw/ssl/cert.pem", "Reverse proxy certificate file")
 	certKeyFile        = flag.String("cert_key_file", "/etc/seesaw/ssl/key.pem", "Reverse proxy certificate private key file")
 )
@@ -24,10 +25,15 @@ func main() {
 	ctx := ipc.NewTrustedContext(seesaw.SCReverseProxy)
 
 	var err error
-	seesawConn, err = conn.NewSeesawRPC(ctx)
+	seesawConn, err = conn.NewSeesawIPC(ctx)
 	if err != nil {
 		log.Fatalf("Failed to connect to engine: %v", err)
 	}
+
+	if err := seesawConn.Dial(*engineSocket); err != nil {
+		log.Fatalf("Failed to connect to engine: %v", err)
+	}
+	defer seesawConn.Close()
 
 	rpsCfg := reverse_proxy.DefaultConfig()
 	rpsCfg.ListenPort = *listenPort

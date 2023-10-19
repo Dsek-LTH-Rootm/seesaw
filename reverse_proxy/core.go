@@ -19,7 +19,7 @@ import (
 )
 
 var defaultConfig = Config{
-	ListenPort:  string(rune(443)),
+	ListenPort:  ":443",
 	CertFile:    "/etc/seesaw/ssl/cert.pem",
 	CertKeyFile: "/etc/seesaw/ssl/key.pem",
 }
@@ -90,23 +90,29 @@ func (e *RPS) Run() {
 func (e *RPS) listen() {
 	cert, err := tls.LoadX509KeyPair(e.cfg.CertFile, e.cfg.CertKeyFile)
 	if err != nil {
-		log.Fatal("cannot load certificate or key:", err)
+		log.Fatalf("cannot load certificate or key: %v", err)
 	}
 
 	config := tls.Config{Certificates: []tls.Certificate{cert}, InsecureSkipVerify: false}
 	//Make a TLS listener
-	ln, err := tls.Listen("tcp", e.cfg.ListenPort, &config)
-	if err != nil {
-		log.Fatal("cannot create listener:", err)
+	//ln, err := tls.Listen("tcp", e.cfg.ListenPort, &config)
+	//if err != nil {
+	//	log.Fatalf("cannot create listener: %v", err)
+	//}
+	httpHandler := customHandler{
+		response: "",
+		rps:      *e,
 	}
 
 	monitorHTTP := &http.Server{
+		Addr:           e.cfg.ListenPort,
+		TLSConfig:      &config,
 		ReadTimeout:    30 * time.Second,
-		Handler:        &customHandler{},
+		Handler:        &httpHandler,
 		WriteTimeout:   30 * time.Second,
 		MaxHeaderBytes: 1 << 20,
 	}
-	go monitorHTTP.ServeTLS(ln, e.cfg.CertFile, e.cfg.CertKeyFile)
+	go monitorHTTP.ListenAndServeTLS(e.cfg.CertFile, e.cfg.CertKeyFile)
 
 	e.listening = true
 	log.Infof("listening on port %v for reverse proxy", e.cfg.ListenPort)
@@ -114,12 +120,10 @@ func (e *RPS) listen() {
 	select {
 	case <-e.shutdownListen:
 		monitorHTTP.Close()
-		ln.Close()
 		e.listening = false
 		e.shutdownListen <- true
 	case <-e.reloadCerts:
 		monitorHTTP.Close()
-		ln.Close()
 		e.listening = false
 	}
 }
@@ -140,11 +144,12 @@ func (c *customHandler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		}
 
 	*/
-
+	log.Infof("serving connection to: %v from %v", request.Host, request.RemoteAddr)
 	//Check if we already have a proxy connection to this location
 	proxy, ok := c.rps.hostProxies[request.Host]
 
 	if ok {
+		log.Infof("found old proxy, serving: %v", request.Host)
 		proxy.ServeHTTP(writer, request)
 		return
 	}
@@ -178,11 +183,13 @@ func (c *customHandler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 						return
 					}
 
+					log.Infof("did not find old proxy, making and serving: %v", request.Host)
 					newProxy := httputil.NewSingleHostReverseProxy(target)
 					c.rps.hostProxies[request.Host] = newProxy
 					newProxy.ServeHTTP(writer, request)
 					return
 				} else {
+					log.Infof("host was not healthy, am not serving: %v", request.Host)
 					writer.Write([]byte("503: Host not currently up"))
 				}
 			}
@@ -190,6 +197,7 @@ func (c *customHandler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 
 	}
 
+	log.Infof("unknown host, forbidden: %v", request.Host)
 	writer.Write([]byte("403: Host forbidden"))
 	return
 }
@@ -197,7 +205,10 @@ func (c *customHandler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 //Monitors the state of the engine HA, to shutdown listen if we are not the master
 func (e *RPS) monitorState() {
 	for {
-		status, _ := e.seesaw.HAStatus()
+		status, err := e.seesaw.HAStatus()
+		if err != nil {
+			log.Fatalf("error getting HA status: %v", err)
+		}
 		e.haMaster <- status.State == 4
 		time.Sleep(5 * time.Second)
 	}
@@ -217,6 +228,7 @@ func (e *RPS) monitorCerts() {
 		}
 
 		if hash := h.Sum(nil); !bytes.Equal(hash, e.certHash) {
+			log.Infof("Certificate changed on disk, reloading..")
 			e.certHash = hash
 			e.reloadCerts <- true
 		}
