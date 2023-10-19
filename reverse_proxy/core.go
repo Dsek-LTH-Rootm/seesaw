@@ -107,9 +107,9 @@ func (e *RPS) listen() {
 	monitorHTTP := &http.Server{
 		Addr:           e.cfg.ListenPort,
 		TLSConfig:      &config,
-		ReadTimeout:    30 * time.Second,
+		ReadTimeout:    10 * time.Second,
 		Handler:        &httpHandler,
-		WriteTimeout:   30 * time.Second,
+		WriteTimeout:   10 * time.Second,
 		MaxHeaderBytes: 1 << 20,
 	}
 	go monitorHTTP.ListenAndServeTLS(e.cfg.CertFile, e.cfg.CertKeyFile)
@@ -176,14 +176,14 @@ func (c *customHandler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 					}
 
 					//Parse the target url. Does not need part after the port, the proxy fixes that
-					target, err := url.Parse("http://" + targetIp + strconv.Itoa(int(service.Port)))
+					target, err := url.Parse("http://" + targetIp + ":" + strconv.Itoa(int(service.Port)))
 
 					if err != nil {
 						log.Warningf("error parsing target IP: %v", err)
 						return
 					}
 
-					log.Infof("did not find old proxy, making and serving: %v", request.Host)
+					log.Infof("did not find old proxy, making and serving: %v using IP: %v", request.Host, "http://"+targetIp+":"+strconv.Itoa(int(service.Port)))
 					newProxy := httputil.NewSingleHostReverseProxy(target)
 					c.rps.hostProxies[request.Host] = newProxy
 					newProxy.ServeHTTP(writer, request)
@@ -191,6 +191,7 @@ func (c *customHandler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 				} else {
 					log.Infof("host was not healthy, am not serving: %v", request.Host)
 					writer.Write([]byte("503: Host not currently up"))
+					return
 				}
 			}
 		}
