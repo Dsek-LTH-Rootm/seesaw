@@ -18,32 +18,32 @@ var defaultConfig = Config{
 	ListenPort:  string(rune(443)),
 	CertFile:    "/etc/seesaw/ssl/cert.pem",
 	CertKeyFile: "/etc/seesaw/ssl/key.pem",
-	seesaw:      nil,
 }
 
 type Config struct {
 	ListenPort  string
 	CertFile    string
 	CertKeyFile string
-	seesaw      *conn.Seesaw
 }
 
 type RPS struct {
 	cfg            *Config
 	shutdown       chan bool
 	shutdownListen chan bool
+	haMaster       chan bool
+	listening      bool
 	hostProxies    map[string]*httputil.ReverseProxy
+	seesaw         *conn.Seesaw
 }
 
-func DefaultConfig(conn *conn.Seesaw) Config {
-	defaultConfig.seesaw = conn
+func DefaultConfig() Config {
 	return defaultConfig
 }
 
 // New returns an initialised RPS struct.
-func New(cfg *Config) *RPS {
+func New(cfg *Config, seesaw *conn.Seesaw) *RPS {
 	if cfg == nil {
-		defaultCfg := DefaultConfig(nil)
+		defaultCfg := DefaultConfig()
 		cfg = &defaultCfg
 	}
 
@@ -51,21 +51,33 @@ func New(cfg *Config) *RPS {
 		cfg:            cfg,
 		shutdown:       make(chan bool),
 		shutdownListen: make(chan bool),
+		haMaster:       make(chan bool),
+		listening:      false,
 		hostProxies:    map[string]*httputil.ReverseProxy{},
+		seesaw:         seesaw,
 	}
 }
 
 // Run starts the RPS.
 func (e *RPS) Run() {
+	go e.monitorState()
 
-	go e.listen()
+	for {
+		select {
+		case <-e.shutdown:
+			e.shutdownListen <- true
+			<-e.shutdownListen
+			return
+		case val := <-e.haMaster:
+			if val && !e.listening {
+				go e.listen()
+			}
+		}
+	}
 
-	<-e.shutdown
-	e.shutdownListen <- true
-	<-e.shutdownListen
 }
 
-// monitoring starts an HTTP server for monitoring purposes.
+// listen starts the HTTPS listener
 func (e *RPS) listen() {
 	cert, err := tls.LoadX509KeyPair(e.cfg.CertFile, e.cfg.CertKeyFile)
 	if err != nil {
@@ -87,10 +99,13 @@ func (e *RPS) listen() {
 	}
 	go monitorHTTP.ServeTLS(ln, e.cfg.CertFile, e.cfg.CertKeyFile)
 
+	e.listening = true
 	log.Infof("listening on port %v for reverse proxy", e.cfg.ListenPort)
 
 	<-e.shutdownListen
-	err = ln.Close()
+	monitorHTTP.Close()
+	ln.Close()
+	e.listening = false
 	e.shutdownListen <- true
 }
 
@@ -99,6 +114,7 @@ type customHandler struct {
 	rps      RPS
 }
 
+// serves as a http handler and chooses which proxy we should forward the request to. Creates new ones as needed.
 func (c *customHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	//Uncomment this and add to condition per comment below if we get mixed-transport issues
 	/*
@@ -119,7 +135,7 @@ func (c *customHandler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	}
 
 	//Get vservers
-	vservers, err := c.rps.cfg.seesaw.Vservers()
+	vservers, err := c.rps.seesaw.Vservers()
 	if err != nil {
 		log.Warningf("error getting vservers: %v", err)
 		return
@@ -161,6 +177,15 @@ func (c *customHandler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 
 	writer.Write([]byte("403: Host forbidden"))
 	return
+}
+
+//Monitors the state of the engine HA, to shutdown listen if we are not the master
+func (e *RPS) monitorState() {
+	for {
+		status, _ := e.seesaw.HAStatus()
+		e.haMaster <- status.State == 4
+		time.Sleep(5 * time.Second)
+	}
 }
 
 // Shutdown signals the RPS server to shutdown.

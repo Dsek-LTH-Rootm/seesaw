@@ -24,17 +24,17 @@ func main() {
 	ctx := ipc.NewTrustedContext(seesaw.SCReverseProxy)
 
 	var err error
-	seesawConn, err = conn.NewSeesawIPC(ctx)
+	seesawConn, err = conn.NewSeesawRPC(ctx)
 	if err != nil {
 		log.Fatalf("Failed to connect to engine: %v", err)
 	}
 
-	rpsCfg := reverse_proxy.DefaultConfig(seesawConn)
+	rpsCfg := reverse_proxy.DefaultConfig()
 	rpsCfg.ListenPort = *listenPort
 	rpsCfg.CertFile = *certFile
 	rpsCfg.CertKeyFile = *certKeyFile
 
-	rps := reverse_proxy.New(&rpsCfg)
+	rps := reverse_proxy.New(&rpsCfg, seesawConn)
 	server.ShutdownHandler(rps)
 	rps.Run()
 }
