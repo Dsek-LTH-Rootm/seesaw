@@ -1,12 +1,16 @@
 package reverse_proxy
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"crypto/tls"
 	"github.com/google/seesaw/common/conn"
 	"github.com/google/seesaw/common/seesaw"
+	"io"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"strconv"
 	"syscall"
 	"time"
@@ -31,9 +35,11 @@ type RPS struct {
 	shutdown       chan bool
 	shutdownListen chan bool
 	haMaster       chan bool
+	reloadCerts    chan bool
 	listening      bool
 	hostProxies    map[string]*httputil.ReverseProxy
 	seesaw         *conn.Seesaw
+	certHash       []byte
 }
 
 func DefaultConfig() Config {
@@ -52,15 +58,18 @@ func New(cfg *Config, seesaw *conn.Seesaw) *RPS {
 		shutdown:       make(chan bool),
 		shutdownListen: make(chan bool),
 		haMaster:       make(chan bool),
+		reloadCerts:    make(chan bool),
 		listening:      false,
 		hostProxies:    map[string]*httputil.ReverseProxy{},
 		seesaw:         seesaw,
+		certHash:       []byte(""),
 	}
 }
 
 // Run starts the RPS.
 func (e *RPS) Run() {
 	go e.monitorState()
+	go e.monitorCerts()
 
 	for {
 		select {
@@ -102,11 +111,17 @@ func (e *RPS) listen() {
 	e.listening = true
 	log.Infof("listening on port %v for reverse proxy", e.cfg.ListenPort)
 
-	<-e.shutdownListen
-	monitorHTTP.Close()
-	ln.Close()
-	e.listening = false
-	e.shutdownListen <- true
+	select {
+	case <-e.shutdownListen:
+		monitorHTTP.Close()
+		ln.Close()
+		e.listening = false
+		e.shutdownListen <- true
+	case <-e.reloadCerts:
+		monitorHTTP.Close()
+		ln.Close()
+		e.listening = false
+	}
 }
 
 type customHandler struct {
@@ -185,6 +200,27 @@ func (e *RPS) monitorState() {
 		status, _ := e.seesaw.HAStatus()
 		e.haMaster <- status.State == 4
 		time.Sleep(5 * time.Second)
+	}
+}
+
+func (e *RPS) monitorCerts() {
+	for {
+		f, err := os.Open(e.cfg.CertFile)
+		if err != nil {
+			log.Warningf("cannot open cert file for update check: %v", err)
+		}
+		defer f.Close()
+
+		h := sha256.New()
+		if _, err := io.Copy(h, f); err != nil {
+			log.Warningf("could not compute hash of cert file: %v", err)
+		}
+
+		if hash := h.Sum(nil); !bytes.Equal(hash, e.certHash) {
+			e.certHash = hash
+			e.reloadCerts <- true
+		}
+		time.Sleep(60 * time.Second)
 	}
 }
 
