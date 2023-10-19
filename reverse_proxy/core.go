@@ -80,6 +80,9 @@ func (e *RPS) Run() {
 		case val := <-e.haMaster:
 			if val && !e.listening {
 				go e.listen()
+			} else if !val && e.listening {
+				e.shutdownListen <- true
+				<-e.shutdownListen
 			}
 		}
 	}
@@ -104,6 +107,7 @@ func (e *RPS) listen() {
 		rps:      *e,
 	}
 
+	//TODO: Implement custom 403, 404, 503-page
 	monitorHTTP := &http.Server{
 		Addr:           e.cfg.ListenPort,
 		TLSConfig:      &config,
@@ -184,12 +188,19 @@ func (c *customHandler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 					}
 
 					log.Infof("did not find old proxy, making and serving: %v using IP: %v", request.Host, "http://"+targetIp+":"+strconv.Itoa(int(service.Port)))
-					newProxy := httputil.NewSingleHostReverseProxy(target)
+					//newProxy := httputil.NewSingleHostReverseProxy(target)
+					newProxy := &httputil.ReverseProxy{
+						Rewrite: func(r *httputil.ProxyRequest) {
+							r.SetURL(target)
+							r.Out.Host = r.In.Host
+						},
+					}
 					c.rps.hostProxies[request.Host] = newProxy
 					newProxy.ServeHTTP(writer, request)
 					return
 				} else {
 					log.Infof("host was not healthy, am not serving: %v", request.Host)
+					writer.WriteHeader(http.StatusServiceUnavailable)
 					writer.Write([]byte("503: Host not currently up"))
 					return
 				}
@@ -199,11 +210,12 @@ func (c *customHandler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	}
 
 	log.Infof("unknown host, forbidden: %v", request.Host)
+	writer.WriteHeader(http.StatusForbidden)
 	writer.Write([]byte("403: Host forbidden"))
 	return
 }
 
-//Monitors the state of the engine HA, to shutdown listen if we are not the master
+// Monitors the state of the engine HA, to shutdown listen if we are not the master
 func (e *RPS) monitorState() {
 	for {
 		status, err := e.seesaw.HAStatus()
